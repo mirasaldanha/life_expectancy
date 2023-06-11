@@ -1,0 +1,210 @@
+---
+title: "Predicting Life Expectancy"
+author: "Mira Saldanha"
+date: "4/16/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(glmnet)
+library(tidyverse)
+library(pls)
+library(reshape2)
+library(randomForest)
+library(caret)
+library(tree)
+library(car)
+```
+
+change line below depending on what you call the file
+```{r}
+df = read.csv(file="LifeExpectancy.csv", header=TRUE, as.is = TRUE)
+```
+
+create a correlation matrix of the potential predictors for life expectancy
+```{r, fig.height=6, fig.width = 7}
+x <- data.matrix(df[1:20])
+y <- data.matrix(df[21])
+
+corr_mat <- round(cor(x),5) #correlation matrix, round to 5 decimal places
+ggplot(data = melt(corr_mat), aes(x=Var1, y=Var2,fill=value)) + geom_tile() +
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+  scale_fill_gradient(low = "magenta",high = "green") +
+  ggtitle("Correlation Matrix")
+```
+Economic_status_Developed and Economic_status_Developing contain all the same data (see perfect inverse correlation). we can remove one of them. i also convert my categorical variables to numeric indicators (not one-hot, because that will give us over 200 columns and I don't think that's necessary). 
+```{r}
+set.seed(123)
+df <- df[c(1:19,21)] #get rid of Economic_status_Developing
+x = x[,1:19] #drop it here too
+
+smp_size <- floor(0.75 * nrow(df)) # 75% for training, rest for testing
+train_ind <- sample(seq_len(nrow(df)), size = smp_size)
+
+train <- data.matrix(df[train_ind,])
+test <- data.matrix(df[-train_ind,][1:19])
+test_y <- unlist(df[-train_ind,][20]) #unlist will get rid of extra dimension 
+```
+
+create a GLM to use as a baseline, take a look at coefficients for fun, get MSE = 1.853
+```{r}
+glm_mod <- glm(Life_expectancy~., data=data.frame(train))
+glm_cof <- glm_mod$coefficients
+glm_pred <- predict(glm_mod, newdata=data.frame(test))
+mean((test_y - glm_pred)^2)
+```
+I wanted an idea for the ranges here, so i found the min and max from the list. !!!!!!!!!!!!!!!!!!!!!!
+```{r}
+max(glm_cof[2:20])
+min(abs(glm_cof[2:20]))
+glm_cof
+```
+
+calculate variance inflation factors, we can see lots of high ones! perhaps an indication that some things can be removed. 
+note that we can see these in the correlation matrix too, this is just to put a number to that
+```{r}
+vif(glm_mod)
+```
+
+make sure that residuals seem normal and our model isn't doing anything weird. we have 1 point way out there...
+```{r}
+residuals <- test_y - glm_pred
+ggplot(data.frame(residuals), aes(x=residuals)) + geom_histogram(fill="violet") +
+  ggtitle("GLM Residuals") + ylab("Frequency") + xlab("Residual")
+```
+
+I found that that point was from Haiti 2010, which was the year of the terrible earthquake. a few variables were very different that year (infant and under 5 deaths), though life expectancy was not, so it makes sense that if those particular variables are weighted high by the model, it's prediction will be off. you can look more into this yourself if to confirm
+```{r}
+haiti <- data.frame(df[df["Country"]=="Haiti",])
+haiti
+```
+
+
+because we could have some correlation, we should try dimension reduction!!!
+but first I will try lasso and ridge
+```{r}
+cv_model_L <- cv.glmnet(x, y, alpha = 1)  #alpha 1 = lasso, 0 is ridge. will do a 10 fold cv
+best_lambda_lasso <- cv_model_L$lambda.min
+
+#standardized by default
+lasso_mod <- glmnet(train[,1:19], train[,20], alpha = 1, lambda = best_lambda_lasso)
+lasso_preds <- predict(lasso_mod, s = best_lambda_lasso, newx = test)
+mean((lasso_preds - test_y)^2)
+```
+
+we get MSE = 1.844, which is not a major improvement from the glm. see which were eliminated: 
+```{r}
+lasso_mod$beta
+```
+
+makes sense to get rid of region, probably does not tell us anything new. polio and diphtheria were highly correlated (see matrix above), so that is my guess for why polio was removed. can look into it more:
+```{r}
+polio_rates = as.numeric(unlist(df["Polio"]))
+LE = as.numeric(unlist(df["Life_expectancy"]))
+plot(LE~polio_rates, ylab="Life Expectancy", xlab="Polio Vaccination Rate", 
+     main="Life Expectancy VS. Polio Vaccines", col="orange")
+
+diph_rates = as.numeric(unlist(df["Diphtheria"]))
+plot(LE~diph_rates, ylab="Life Expectancy", xlab="Diphtheria Vaccination Rate", 
+     main="Life Expectancy VS. Diphtheria Vaccines", col="orange")
+```
+lasso will removed a predictor when it's highly correlated with another, which isn't always good, but in this case I think it's fine. it doesn't seem like we are losing a ton of information
+
+look at region just to see:
+```{r, fig.height=6}
+region = as.factor(unlist(df["Region"]))
+tmp = data.frame(region, LE)
+tmp$index = 1:nrow(tmp)
+ggplot(tmp, aes(x=region, y=LE)) + geom_boxplot(color="magenta", fill="lightblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size=12), 
+        axis.text.y = element_text(size=12),
+        plot.title = element_text(size=22),
+        axis.title=element_text(size=16)) +
+  ggtitle("Life Expectancy VS. Region") + xlab("Region") + ylab("Life Expectancy")
+
+```
+nothing super significant or that probably could not be explained by many of our other predictors
+
+ridge regression:
+```{r}
+cv_model_R <- cv.glmnet(x, y, alpha = 0)  #alpha 1 = lasso, 0 is ridge. will do another 10 fold cv
+best_lambda_ridge <- cv_model_R$lambda.min
+
+#still standardized by default
+ridge_mod <- glmnet(train[,1:19], train[,20], alpha = 0, lambda = best_lambda_ridge)
+ridge_preds <- predict(ridge_mod, s = best_lambda_ridge, newx = test)
+mean((ridge_preds - test_y)^2)
+```
+MSE = 2.204 (it got worse!) look at our coefficients (again just for fun:
+```{r}
+ridge_mod$beta
+```
+
+try a KNN approach - not really justified but I wanted to try it. we have (relatively, for this approach) high dimensionality so I do not expect good results. 
+```{r}
+trControl <- trainControl(method  = "cv",number = 10)
+knn_mod <- train(Life_expectancy ~ ., method = "knn",
+             tuneGrid = expand.grid(k = 1:10), trControl = trControl,
+             metric = "RMSE", data = data.frame(train))
+knn_pred <- predict(knn_mod, test)
+mean((knn_pred - test_y)^2)
+```
+
+MSE = 6.183 ! not good (as expected)
+
+dimension reduction which might help bc of correlation (and above results) - BUT we only have ~20 predictors, not dozens or hundreds, so any improvement might be small
+use cross validation since we want predictive performance !!!!!
+
+```{r}
+pcr_mod <- pcr(Life_expectancy~., data=data.frame(train), scale=TRUE, validation="CV")
+summary(pcr_mod)
+```
+
+we can see from the CV RMSEP, almost all of our principle components are important. we can try a few different numbers - 12 PCs can explain 95% of our variance
+```{r}
+num_comp <- 12
+pcr_pred <- drop(predict(pcr_mod, test, ncomp=num_comp))
+mean((test_y - pcr_pred)^2)
+```
+this is not an improvement at all -- try 16
+```{r}
+num_comp <- 16
+pcr_pred <- drop(predict(pcr_mod, test, ncomp=num_comp))
+mean((test_y - pcr_pred)^2)
+```
+similar to GLM. was not a helpful approach really, probably because we didn't have tons of highly correlated predictors.
+
+try a random forest, so we can make use of averaging, and account for potential additivity...
+```{r}
+#with m = p/3 roughly
+rf <- randomForest(Life_expectancy~., data = data.frame(train), mtry = 6)
+pred_rf <- predict(rf, test)
+mean((pred_rf-test_y)^2)
+```
+MSE = 0.227 !!! a major improvment! this makes sense because the RF can account for far more, and if there is any additivty to be considered, it is being considered. 
+
+this is pretty sufficient for predicting life expectancy accurately, but it is not very interpretable. I have no idea what is going on in there or which predictors matter. 
+
+try a decision tree for this - i expect a higher MSE, but something that anyone could understand. use cross validation to find the optimal number of terminal nodes, and then prune the tree to get there.
+```{r, fig.height=5}
+tree <- tree(Life_expectancy ~ ., data=data.frame(train))
+cvtree <- cv.tree(tree)
+cv_error <- cvtree$dev
+cv_num_nodes <- cvtree$size
+terminal_nodes <- cv_num_nodes[which.min(cv_error)] #use num terminal nodes with best CV error rate
+
+pruned <- prune.tree(tree, best=terminal_nodes)
+plot(pruned, lwd=5, col="lightblue")
+text(pruned, pretty=0)
+
+pred_tree <- predict(pruned, data.frame(test))
+mean((pred_tree - test_y)^2)
+```
+
+MSE is not very good (as expected), but this tree is very easy to interpret! we also see that under_five_deaths is pretty important, which might explain why we got the Haiti outlier. 
+
+we have completed both tasks using a variety of approaches, and our results for each make sense!
