@@ -6,6 +6,7 @@ data can be found here: https://www.kaggle.com/datasets/lashagoch/life-expectanc
   - i downloaded and renamed it to LifeExpectancy.csv, and added to the folder that RStudio opens in
   - if you do something else, you'll need to modify the line where I read it in
 
+language used: R
 packages used: glmnet, tidyverse, pls, reshape2, randomForest, caret, tree, car
 
 please feel free to reach out with any comments / suggestions / questions !
